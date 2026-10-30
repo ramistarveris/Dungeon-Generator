@@ -66,29 +66,55 @@ public class DungeonGenerator : MonoBehaviour
         entrance = new Vector2Int(width / 2, height / 2);
         occupied.Add(entrance);
 
-        // A randomized frontier grows one connected dungeon without a walk timeout.
-        List<Vector2Int> frontier = new() { entrance };
+        // Grow a compact, approximately rectangular footprint.
+        // Each new cell must touch an existing cell, preserving connectivity.
         while (occupied.Count < target)
         {
-            Vector2Int from = frontier[random.Next(frontier.Count)];
-            List<Vector2Int> options = new();
-            foreach (Vector2Int direction in Directions)
+            Vector2Int bestCell = default;
+            Vector2Int bestParent = default;
+            float bestScore = float.NegativeInfinity;
+
+            foreach (Vector2Int from in occupied)
             {
-                Vector2Int next = from + direction;
-                if (next.x >= 0 && next.y >= 0 && next.x < width && next.y < height && !occupied.Contains(next))
-                    options.Add(next);
+                foreach (Vector2Int direction in Directions)
+                {
+                    Vector2Int candidate = from + direction;
+                    if (candidate.x < 0 || candidate.y < 0 ||
+                        candidate.x >= width || candidate.y >= height ||
+                        occupied.Contains(candidate))
+                        continue;
+
+                    int neighbors = 0;
+                    foreach (Vector2Int adjacent in Directions)
+                        if (occupied.Contains(candidate + adjacent)) neighbors++;
+
+                    int minX = candidate.x, maxX = candidate.x;
+                    int minY = candidate.y, maxY = candidate.y;
+                    foreach (Vector2Int cell in occupied)
+                    {
+                        minX = Mathf.Min(minX, cell.x);
+                        maxX = Mathf.Max(maxX, cell.x);
+                        minY = Mathf.Min(minY, cell.y);
+                        maxY = Mathf.Max(maxY, cell.y);
+                    }
+
+                    int spanX = maxX - minX + 1;
+                    int spanY = maxY - minY + 1;
+                    int emptyInBounds = spanX * spanY - (occupied.Count + 1);
+                    float score = neighbors * 5f
+                        - emptyInBounds * 1.5f
+                        - Mathf.Abs(spanX - spanY) * 2f
+                        + (float)random.NextDouble() * 4f;
+
+                    if (score <= bestScore) continue;
+                    bestScore = score;
+                    bestCell = candidate;
+                    bestParent = from;
+                }
             }
 
-            if (options.Count == 0)
-            {
-                frontier.Remove(from);
-                continue;
-            }
-
-            Vector2Int added = options[random.Next(options.Count)];
-            occupied.Add(added);
-            frontier.Add(added);
-            AddConnection(from, added);
+            occupied.Add(bestCell);
+            AddConnection(bestParent, bestCell);
         }
 
         boss = FindFarthestCell();
