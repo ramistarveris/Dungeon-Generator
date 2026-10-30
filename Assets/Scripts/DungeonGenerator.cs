@@ -15,6 +15,11 @@ public class DungeonGenerator : MonoBehaviour
     public Color normalColor = new Color32(153, 76, 0, 255);
     public Color entranceColor = Color.green;
     public Color bossColor = Color.red;
+    public Color fairyColor = new Color32(255, 130, 190, 255);
+    public Color puzzleColor = new Color32(160, 85, 220, 255);
+    public Color trapColor = new Color32(255, 145, 35, 255);
+    public Color minibossColor = Color.yellow;
+    public Color witherDoorColor = Color.black;
     public Color corridorColor = Color.gray;
 
     // Floor occupancy is an adjustable visual approximation, not a verified Hypixel rate.
@@ -32,12 +37,11 @@ public class DungeonGenerator : MonoBehaviour
         new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.up, Vector2Int.one }, // 2x2
         new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.right * 2, Vector2Int.right * 3 }, // 1x4
         new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.right * 2 }, // 1x3
-        new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.up }, // 1x3 L
         new[] { Vector2Int.zero, Vector2Int.right }, // 1x2
         new[] { Vector2Int.zero } // 1x1
     };
 
-    private static readonly string[] ShapeNames = { "2x2", "1x4", "1x3", "1x3_L", "1x2", "1x1" };
+    private static readonly string[] ShapeNames = { "2x2", "1x4", "1x3", "1x2", "1x1" };
 
     private readonly HashSet<Vector2Int> occupied = new();
     private readonly HashSet<(Vector2Int, Vector2Int)> connections = new();
@@ -118,16 +122,71 @@ public class DungeonGenerator : MonoBehaviour
         }
 
         boss = FindFarthestCell();
+        // Recover the critical path from Entrance to Blood using the spanning tree.
+        Dictionary<Vector2Int, Vector2Int> parents = new() { [entrance] = entrance };
+        Queue<Vector2Int> queue = new();
+        queue.Enqueue(entrance);
+        while (queue.Count > 0)
+        {
+            Vector2Int current = queue.Dequeue();
+            foreach (Vector2Int direction in Directions)
+            {
+                Vector2Int next = current + direction;
+                if (!occupied.Contains(next) || parents.ContainsKey(next) || !HasConnection(current, next)) continue;
+                parents[next] = current;
+                queue.Enqueue(next);
+            }
+        }
+        List<Vector2Int> path = new();
+        for (Vector2Int cell = boss; ; cell = parents[cell])
+        {
+            path.Add(cell);
+            if (cell == entrance) break;
+        }
+        path.Reverse();
+        HashSet<Vector2Int> critical = new(path);
+        Vector2Int fairy = path.Count > 2 ? path[path.Count / 2] : entrance;
+        List<Vector2Int> leaves = new();
+        foreach (Vector2Int cell in occupied)
+        {
+            if (critical.Contains(cell)) continue;
+            int degree = 0;
+            foreach (Vector2Int direction in Directions)
+                if (HasConnection(cell, cell + direction)) degree++;
+            if (degree == 1) leaves.Add(cell);
+        }
+        leaves.Sort((a, b) => a.x != b.x ? a.x.CompareTo(b.x) : a.y.CompareTo(b.y));
+        for (int i = leaves.Count - 1; i > 0; i--)
+        {
+            int j = random.Next(i + 1);
+            (leaves[i], leaves[j]) = (leaves[j], leaves[i]);
+        }
+        Dictionary<Vector2Int, (string label, Color color)> special = new();
+        if (fairy != entrance) special[fairy] = ("Fairy", fairyColor);
+        int leafIndex = 0;
+        for (int i = 0; i < 2 && leafIndex < leaves.Count; i++)
+            special[leaves[leafIndex++]] = ("Puzzle", puzzleColor);
+        if (floorLevel >= 3 && leafIndex < leaves.Count)
+            special[leaves[leafIndex++]] = ("Trap", trapColor);
+        if (leafIndex < leaves.Count)
+            special[leaves[leafIndex++]] = ("Miniboss", minibossColor);
 
         // Reserve Entrance and Boss as single-cell rooms.
         HashSet<Vector2Int> remaining = new(occupied);
         remaining.Remove(entrance);
         remaining.Remove(boss);
+        foreach (Vector2Int cell in special.Keys) remaining.Remove(cell);
         int roomId = 0;
         CreateRoom(roomId, "Entrance", new List<Vector2Int> { entrance }, entranceColor);
         cellRoomIds[entrance] = roomId++;
-        CreateRoom(roomId, "Boss", new List<Vector2Int> { boss }, bossColor);
+        CreateRoom(roomId, "Blood", new List<Vector2Int> { boss }, bossColor);
         cellRoomIds[boss] = roomId++;
+
+        foreach (var entry in special)
+        {
+            CreateRoom(roomId, entry.Value.label, new List<Vector2Int> { entry.Key }, entry.Value.color);
+            cellRoomIds[entry.Key] = roomId++;
+        }
 
         while (remaining.Count > 0)
         {
@@ -173,10 +232,39 @@ public class DungeonGenerator : MonoBehaviour
         foreach (var edge in connections)
         {
             if (cellRoomIds[edge.Item1] != cellRoomIds[edge.Item2])
+            {
                 CreateCorridor(edge.Item1, edge.Item2);
+                if (critical.Contains(edge.Item1) && critical.Contains(edge.Item2))
+                {
+                    if (edge.Item1 == boss || edge.Item2 == boss)
+                        CreateDoor(edge.Item1, edge.Item2, "BloodDoor", bossColor);
+                    else if (random.NextDouble() < .35)
+                        CreateDoor(edge.Item1, edge.Item2, "WitherDoor", witherDoorColor);
+                }
+            }
         }
 
         Debug.Log($"F{floorLevel}: {roomId} rooms, {occupied.Count}/{width * height} cells, seed {seed}");
+    }
+
+    private bool HasConnection(Vector2Int a, Vector2Int b)
+    {
+        if (a.x > b.x || (a.x == b.x && a.y > b.y)) (a, b) = (b, a);
+        return connections.Contains((a, b));
+    }
+
+    private void CreateDoor(Vector2Int a, Vector2Int b, string label, Color color)
+    {
+        GameObject door = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        door.name = label;
+        door.transform.SetParent(transform, false);
+        generated.Add(door);
+        door.transform.localPosition = new Vector3((a.x + b.x) * roomSpacing / 2f, .35f,
+            (a.y + b.y) * roomSpacing / 2f);
+        door.transform.localScale = a.x != b.x
+            ? new Vector3(.2f, 1f, corridorWidth)
+            : new Vector3(corridorWidth, 1f, .2f);
+        SetColor(door, color);
     }
 
     private void ClearGenerated()
