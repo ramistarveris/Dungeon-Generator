@@ -256,7 +256,7 @@ public class DungeonGenerator : MonoBehaviour
                 {
                     if (edge.Item1 == boss || edge.Item2 == boss)
                         CreateDoor(edge.Item1, edge.Item2, "BloodDoor", bossColor);
-                    else if (random.NextDouble() < .35)
+                    else
                         CreateDoor(edge.Item1, edge.Item2, "WitherDoor", witherDoorColor);
                 }
             }
