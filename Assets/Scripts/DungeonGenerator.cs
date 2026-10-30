@@ -173,7 +173,7 @@ public class DungeonGenerator : MonoBehaviour
         Dictionary<Vector2Int, (string label, Color color)> special = new();
         if (fairy != entrance) special[fairy] = ("Fairy", fairyColor);
         int leafIndex = 0;
-        int puzzleTarget = floorLevel == 7 ? 5 : 2;
+        int puzzleTarget = Mathf.Clamp(1 + Mathf.RoundToInt((floorLevel - 1) * 4f / 6f), 1, 5); // F1-F7: 1, 2, 2, 3, 4, 4, 5
         List<Vector2Int> puzzleCells = new(leaves);
         if (puzzleCells.Count < puzzleTarget)
         {
