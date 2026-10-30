@@ -173,10 +173,19 @@ public class DungeonGenerator : MonoBehaviour
         Dictionary<Vector2Int, (string label, Color color)> special = new();
         if (fairy != entrance) special[fairy] = ("Fairy", fairyColor);
         int leafIndex = 0;
-        for (int i = 0; i < 2 && leafIndex < leaves.Count; i++)
-            special[leaves[leafIndex++]] = ("Puzzle", puzzleColor);
+        int puzzleTarget = floorLevel == 7 ? 5 : 2;
+        List<Vector2Int> puzzleCells = new(leaves);
+        if (puzzleCells.Count < puzzleTarget)
+        {
+            foreach (Vector2Int cell in occupied)
+                if (!critical.Contains(cell) && !puzzleCells.Contains(cell)) puzzleCells.Add(cell);
+        }
+        for (int i = 0; i < puzzleTarget && i < puzzleCells.Count; i++)
+            special[puzzleCells[i]] = ("Puzzle", puzzleColor);
+        while (leafIndex < leaves.Count && special.ContainsKey(leaves[leafIndex])) leafIndex++;
         if (floorLevel >= 3 && leafIndex < leaves.Count)
             special[leaves[leafIndex++]] = ("Trap", trapColor);
+        while (leafIndex < leaves.Count && special.ContainsKey(leaves[leafIndex])) leafIndex++;
         if (leafIndex < leaves.Count)
             special[leaves[leafIndex++]] = ("Miniboss", minibossColor);
 
