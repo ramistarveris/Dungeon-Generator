@@ -67,7 +67,15 @@ public class DungeonGenerator : MonoBehaviour
         int height = Heights[index];
         int target = Mathf.Clamp(Mathf.RoundToInt(width * height * Densities[index]), 2, width * height);
 
-        entrance = new Vector2Int(width / 2, height / 2);
+        // Entrance starts on the outer boundary, never in the center.
+        int side = random.Next(4);
+        entrance = side switch
+        {
+            0 => new Vector2Int(0, random.Next(height)),
+            1 => new Vector2Int(width - 1, random.Next(height)),
+            2 => new Vector2Int(random.Next(width), 0),
+            _ => new Vector2Int(random.Next(width), height - 1)
+        };
         occupied.Add(entrance);
 
         // Grow a compact, approximately rectangular footprint.
@@ -121,7 +129,8 @@ public class DungeonGenerator : MonoBehaviour
             AddConnection(bestParent, bestCell);
         }
 
-        boss = FindFarthestCell();
+        // Blood must also be on the outer boundary.
+        boss = FindFarthestBoundaryCell(width, height);
         // Recover the critical path from Entrance to Blood using the spanning tree.
         Dictionary<Vector2Int, Vector2Int> parents = new() { [entrance] = entrance };
         Queue<Vector2Int> queue = new();
@@ -291,6 +300,31 @@ public class DungeonGenerator : MonoBehaviour
     {
         if (a.x > b.x || (a.x == b.x && a.y > b.y)) (a, b) = (b, a);
         connections.Add((a, b));
+    }
+
+    private Vector2Int FindFarthestBoundaryCell(int width, int height)
+    {
+        Queue<Vector2Int> queue = new();
+        Dictionary<Vector2Int, int> distances = new() { [entrance] = 0 };
+        queue.Enqueue(entrance);
+        Vector2Int farthest = entrance;
+        while (queue.Count > 0)
+        {
+            Vector2Int current = queue.Dequeue();
+            bool boundary = current.x == 0 || current.y == 0 ||
+                current.x == width - 1 || current.y == height - 1;
+            if (boundary && distances[current] > distances[farthest])
+                farthest = current;
+            foreach (Vector2Int direction in Directions)
+            {
+                Vector2Int next = current + direction;
+                if (!occupied.Contains(next) || distances.ContainsKey(next) ||
+                    !HasConnection(current, next)) continue;
+                distances[next] = distances[current] + 1;
+                queue.Enqueue(next);
+            }
+        }
+        return farthest;
     }
 
     private Vector2Int FindFarthestCell()
