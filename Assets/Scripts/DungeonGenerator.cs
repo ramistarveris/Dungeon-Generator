@@ -20,7 +20,7 @@ public class DungeonGenerator : MonoBehaviour
     // Floor occupancy is an adjustable visual approximation, not a verified Hypixel rate.
     private static readonly int[] Widths = { 4, 5, 5, 6, 6, 6, 6 };
     private static readonly int[] Heights = { 5, 5, 5, 5, 5, 6, 6 };
-    private static readonly float[] Densities = { .70f, .74f, .78f, .82f, .86f, .90f, .95f };
+    private static readonly float[] Densities = { .70f, .74f, .78f, .82f, .86f, .90f, 1.00f };
 
     private static readonly Vector2Int[] Directions =
     {
