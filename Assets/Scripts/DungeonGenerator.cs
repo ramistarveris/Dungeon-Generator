@@ -2,12 +2,33 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
+public enum DungeonGenerationMode
+{
+    DungeonMap,
+    Dungeon
+}
+
 public class DungeonGenerator : MonoBehaviour
 {
     [Header("Dungeon Settings")]
     [Range(1, 7)] public int floorLevel = 1;
     public int seed = 12345;
     public float roomSpacing = 5f;
+
+    [Header("Generation Mode")]
+    public DungeonGenerationMode generationMode = DungeonGenerationMode.DungeonMap;
+
+    [Header("Dungeon Mode - 3D Geometry")]
+    [Min(8f)] public float dungeonCellSpacing = 26f;
+    [Min(4f)] public float dungeonRoomSize = 20f;
+    [Min(1f)] public float dungeonCorridorWidth = 5f;
+    [Min(1f)] public float dungeonWallHeight = 6f;
+    [Min(.1f)] public float dungeonWallThickness = .8f;
+    public bool generateCeilings = false;
+    public Color dungeonFloorColor = new Color32(107, 104, 95, 255);
+    public Color dungeonWallColor = new Color32(73, 73, 77, 255);
+    public Color dungeonAccentColor = new Color32(128, 115, 92, 255);
+
     [Header("Preview")]
     public bool frameMainCamera = true;
 
@@ -50,6 +71,7 @@ public class DungeonGenerator : MonoBehaviour
     private readonly HashSet<(Vector2Int, Vector2Int)> connections = new();
     private readonly Dictionary<Vector2Int, int> cellRoomIds = new();
     private readonly List<GameObject> generated = new();
+    private readonly Dictionary<uint, Material> generatedMaterials = new();
     private System.Random random;
     private Vector2Int entrance;
     private Vector2Int boss;
@@ -435,6 +457,13 @@ public class DungeonGenerator : MonoBehaviour
             else DestroyImmediate(obj);
         }
         generated.Clear();
+        foreach (Material material in generatedMaterials.Values)
+        {
+            if (material == null) continue;
+            if (Application.isPlaying) Destroy(material);
+            else DestroyImmediate(material);
+        }
+        generatedMaterials.Clear();
     }
 
     private static Vector2Int Rotate(Vector2Int p, int turns) => turns switch
@@ -451,71 +480,282 @@ public class DungeonGenerator : MonoBehaviour
         connections.Add((a, b));
     }
 
+    private float WorldSpacing => generationMode == DungeonGenerationMode.Dungeon
+        ? Mathf.Max(8f, dungeonCellSpacing) : Mathf.Max(.5f, roomSpacing);
+
+    private float DungeonSpan => Mathf.Clamp(dungeonRoomSize, 4f, WorldSpacing - 1f);
+
+    private float DungeonPassageWidth => Mathf.Clamp(dungeonCorridorWidth, 1f, DungeonSpan * .75f);
+
     private void CreateRoom(int id, string shape, List<Vector2Int> cells, Color color, int rotation = 0)
     {
         GameObject parent = new($"Room_{id}_{shape}_R{rotation * 90}");
         parent.transform.SetParent(transform, false);
         generated.Add(parent);
 
-        // Expand each tile to its neighbor inside the same room, leaving a
-        // gap only around the room perimeter. Multi-cell rooms therefore
-        // render as a single connected footprint rather than separate squares.
-        HashSet<Vector2Int> members = new(cells);
-        float spacing = Mathf.Max(roomSpacing, .1f);
-        float border = Mathf.Clamp((spacing - roomSize) * .5f, .025f, spacing * .45f);
+        if (generationMode == DungeonGenerationMode.DungeonMap)
+            CreateMapRoom(parent.transform, cells, color);
+        else
+            CreateDungeonRoom(parent.transform, id, shape, cells, color);
+    }
+
+    // Fixed-size cells plus internal bridges: no enlarged/offset center tile
+    // on an L-shaped room. Adjacent cells share a seamless footprint.
+    private void CreateMapRoom(Transform parent, List<Vector2Int> cells, Color color)
+    {
+        float spacing = WorldSpacing;
+        float size = Mathf.Clamp(roomSize, .2f, spacing - .1f);
         foreach (Vector2Int cell in cells)
         {
-            float cx = cell.x * spacing;
-            float cz = cell.y * spacing;
-            float xMin = cx - spacing * .5f + (members.Contains(cell + Vector2Int.left) ? 0f : border);
-            float xMax = cx + spacing * .5f - (members.Contains(cell + Vector2Int.right) ? 0f : border);
-            float zMin = cz - spacing * .5f + (members.Contains(cell + Vector2Int.down) ? 0f : border);
-            float zMax = cz + spacing * .5f - (members.Contains(cell + Vector2Int.up) ? 0f : border);
+            CreateBlock(parent, $"MapTile_{cell.x}_{cell.y}",
+                new Vector3(cell.x * spacing, 0f, cell.y * spacing),
+                new Vector3(size, .5f, size), color);
+        }
+        JoinRoomCells(parent, cells, spacing, size, .5f, color);
+    }
 
-            GameObject tile = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            tile.name = $"Tile_{cell.x}_{cell.y}";
-            tile.transform.SetParent(parent.transform, false);
-            tile.transform.localPosition = new Vector3((xMin + xMax) * .5f, 0, (zMin + zMax) * .5f);
-            tile.transform.localScale = new Vector3(xMax - xMin, .5f, zMax - zMin);
-            SetColor(tile, color);
+    // Primitive-based 3D prototype: traversable floors, walls with proper
+    // openings, corridors, varied rubble/pillars and optional ceilings.
+    // Geometry is based on the exact same room graph as DungeonMap.
+    private void CreateDungeonRoom(Transform parent, int id, string shape,
+        List<Vector2Int> cells, Color mapColor)
+    {
+        float spacing = WorldSpacing;
+        float size = DungeonSpan;
+        float wallHeight = Mathf.Max(1f, dungeonWallHeight);
+        float thickness = Mathf.Clamp(dungeonWallThickness, .1f, size * .15f);
+        float passageWidth = DungeonPassageWidth;
+        float floorThickness = .65f;
+        HashSet<Vector2Int> members = new(cells);
+        Color floorColor = Color.Lerp(dungeonFloorColor, mapColor, .12f);
+
+        foreach (Vector2Int cell in cells)
+        {
+            Vector3 center = new(cell.x * spacing, 0f, cell.y * spacing);
+            CreateBlock(parent, $"Floor_{cell.x}_{cell.y}",
+                center + Vector3.down * (floorThickness * .5f),
+                new Vector3(size, floorThickness, size), floorColor);
+
+            if (generateCeilings)
+                CreateBlock(parent, $"Ceiling_{cell.x}_{cell.y}",
+                    center + Vector3.up * (wallHeight + thickness * .5f),
+                    new Vector3(size, thickness, size), dungeonWallColor);
+
+            foreach (Vector2Int direction in Directions)
+            {
+                if (members.Contains(cell + direction)) continue;
+                bool doorway = HasConnection(cell, cell + direction);
+                CreateDungeonWall(parent, cell, direction, size, thickness,
+                    wallHeight, doorway ? passageWidth : 0f);
+            }
+        }
+
+        JoinRoomCells(parent, cells, spacing, size, floorThickness, floorColor);
+
+        // Repeatable low obstacles placed near corners, away from door axes.
+        // This gives rooms geometry beyond a flat map without blocking routes.
+        System.Random terrainRandom = new(unchecked(seed * 397 ^ id * 7919));
+        foreach (Vector2Int cell in cells)
+        {
+            if (shape == "Entrance" || shape == "Blood" || shape == "Fairy")
+                continue;
+
+            int count = terrainRandom.Next(1, 4);
+            for (int i = 0; i < count; i++)
+            {
+                float sx = terrainRandom.Next(2) == 0 ? -1f : 1f;
+                float sz = terrainRandom.Next(2) == 0 ? -1f : 1f;
+                float x = (cell.x * spacing) + sx * size * (.29f + (float)terrainRandom.NextDouble() * .06f);
+                float z = (cell.y * spacing) + sz * size * (.29f + (float)terrainRandom.NextDouble() * .06f);
+                float width = size * (.08f + (float)terrainRandom.NextDouble() * .07f);
+                float height = .35f + (float)terrainRandom.NextDouble() * .85f;
+                CreateBlock(parent, $"Terrain_{cell.x}_{cell.y}_{i}",
+                    new Vector3(x, height * .5f, z),
+                    new Vector3(width, height, width),
+                    Color.Lerp(dungeonFloorColor, dungeonAccentColor, .5f));
+            }
+        }
+
+        if (shape == "Blood" || shape == "Fairy" || shape == "Puzzle" || shape == "Trap")
+        {
+            Vector2Int cell = cells[0];
+            Color marker = Color.Lerp(dungeonAccentColor, mapColor, .6f);
+            CreateBlock(parent, $"Landmark_{shape}",
+                new Vector3(cell.x * spacing, .35f, cell.y * spacing),
+                new Vector3(size * .15f, .7f, size * .15f), marker);
+        }
+    }
+
+    private void CreateDungeonWall(Transform parent, Vector2Int cell,
+        Vector2Int direction, float size, float thickness, float height, float opening)
+    {
+        float cx = cell.x * WorldSpacing;
+        float cz = cell.y * WorldSpacing;
+        bool onXSide = direction.x != 0;
+        float wallX = cx + direction.x * size * .5f;
+        float wallZ = cz + direction.y * size * .5f;
+        float segmentLength = opening > 0f ? (size - opening) * .5f : size;
+        if (segmentLength <= .01f) return;
+
+        int segments = opening > 0f ? 2 : 1;
+        for (int i = 0; i < segments; i++)
+        {
+            float offset = opening > 0f
+                ? (i == 0 ? -1f : 1f) * (opening + segmentLength) * .5f : 0f;
+            Vector3 position = onXSide
+                ? new Vector3(wallX, height * .5f, cz + offset)
+                : new Vector3(cx + offset, height * .5f, wallZ);
+            Vector3 scale = onXSide
+                ? new Vector3(thickness, height, segmentLength)
+                : new Vector3(segmentLength, height, thickness);
+            CreateBlock(parent, $"Wall_{cell.x}_{cell.y}_{direction.x}_{direction.y}_{i}",
+                position, scale, dungeonWallColor);
+        }
+    }
+
+    // Fill each internal adjacency once, including the central square of 2x2
+    // rooms. All bridges stay within their own grid footprint, unlike the
+    // old neighbor-dependent tile scaling.
+    private void JoinRoomCells(Transform parent, List<Vector2Int> cells,
+        float spacing, float size, float height, Color color)
+    {
+        HashSet<Vector2Int> members = new(cells);
+        float gap = spacing - size;
+        if (gap <= .001f) return;
+        foreach (Vector2Int cell in cells)
+        {
+            if (members.Contains(cell + Vector2Int.right))
+                CreateBlock(parent, $"InternalBridge_X_{cell.x}_{cell.y}",
+                    new Vector3((cell.x + .5f) * spacing, -height * .5f,
+                        cell.y * spacing),
+                    new Vector3(gap + .02f, height, size), color);
+
+            if (members.Contains(cell + Vector2Int.up))
+                CreateBlock(parent, $"InternalBridge_Z_{cell.x}_{cell.y}",
+                    new Vector3(cell.x * spacing, -height * .5f,
+                        (cell.y + .5f) * spacing),
+                    new Vector3(size, height, gap + .02f), color);
+
+            if (members.Contains(cell + Vector2Int.right) &&
+                members.Contains(cell + Vector2Int.up) &&
+                members.Contains(cell + Vector2Int.one))
+                CreateBlock(parent, $"InternalCorner_{cell.x}_{cell.y}",
+                    new Vector3((cell.x + .5f) * spacing, -height * .5f,
+                        (cell.y + .5f) * spacing),
+                    new Vector3(gap + .02f, height, gap + .02f), color);
         }
     }
 
     private void CreateCorridor(Vector2Int a, Vector2Int b, Color color)
     {
-        GameObject corridor = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        corridor.name = $"Corridor_{a.x}_{a.y}_to_{b.x}_{b.y}";
-        corridor.transform.SetParent(transform, false);
-        generated.Add(corridor);
-        Vector3 posA = new(a.x * roomSpacing, 0, a.y * roomSpacing);
-        Vector3 posB = new(b.x * roomSpacing, 0, b.y * roomSpacing);
-        corridor.transform.localPosition = (posA + posB) / 2f;
-        corridor.transform.localScale = a.x != b.x
-            ? new Vector3(roomSpacing, .3f, corridorWidth)
-            : new Vector3(corridorWidth, .3f, roomSpacing);
-        SetColor(corridor, color);
+        GameObject parent = new($"Corridor_{a.x}_{a.y}_to_{b.x}_{b.y}");
+        parent.transform.SetParent(transform, false);
+        generated.Add(parent);
+
+        float spacing = WorldSpacing;
+        Vector3 middle = new((a.x + b.x) * spacing * .5f, 0f,
+            (a.y + b.y) * spacing * .5f);
+        bool alongX = a.x != b.x;
+
+        if (generationMode == DungeonGenerationMode.DungeonMap)
+        {
+            CreateBlock(parent.transform, "MapPassage", middle,
+                alongX
+                    ? new Vector3(spacing, .3f, corridorWidth)
+                    : new Vector3(corridorWidth, .3f, spacing), color);
+            return;
+        }
+
+        float length = spacing - DungeonSpan + .04f;
+        float width = DungeonPassageWidth;
+        float floorThickness = .65f;
+        float wallHeight = Mathf.Max(1f, dungeonWallHeight);
+        float thickness = Mathf.Clamp(dungeonWallThickness, .1f, DungeonSpan * .15f);
+
+        CreateBlock(parent.transform, "PassageFloor",
+            middle + Vector3.down * floorThickness * .5f,
+            alongX
+                ? new Vector3(length, floorThickness, width)
+                : new Vector3(width, floorThickness, length), color);
+
+        for (int side = -1; side <= 1; side += 2)
+        {
+            Vector3 position = alongX
+                ? middle + new Vector3(0f, wallHeight * .5f,
+                    side * (width + thickness) * .5f)
+                : middle + new Vector3(side * (width + thickness) * .5f,
+                    wallHeight * .5f, 0f);
+            Vector3 dimensions = alongX
+                ? new Vector3(length, wallHeight, thickness)
+                : new Vector3(thickness, wallHeight, length);
+            CreateBlock(parent.transform, side == -1 ? "LeftWall" : "RightWall",
+                position, dimensions, dungeonWallColor);
+        }
+
+        if (generateCeilings)
+            CreateBlock(parent.transform, "PassageCeiling",
+                middle + Vector3.up * (wallHeight + thickness * .5f),
+                alongX
+                    ? new Vector3(length, thickness, width)
+                    : new Vector3(width, thickness, length), dungeonWallColor);
+    }
+
+    private GameObject CreateBlock(Transform parent, string name,
+        Vector3 position, Vector3 scale, Color color)
+    {
+        GameObject block = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        block.name = name;
+        block.transform.SetParent(parent, false);
+        block.transform.localPosition = position;
+        block.transform.localScale = scale;
+        SetColor(block, color);
+        return block;
     }
 
     private void FrameMainCamera(int width, int height)
     {
         if (!frameMainCamera || Camera.main == null) return;
         Camera camera = Camera.main;
-        camera.orthographic = true;
-        camera.transform.position = new Vector3((width - 1) * roomSpacing * .5f,
-            Mathf.Max(width, height) * roomSpacing * 1.5f,
-            (height - 1) * roomSpacing * .5f);
-        camera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
-        float verticalHalf = height * roomSpacing * .5f;
-        float horizontalHalf = width * roomSpacing / (2f * Mathf.Max(.1f, camera.aspect));
-        camera.orthographicSize = Mathf.Max(verticalHalf, horizontalHalf) + roomSpacing;
+        float spacing = WorldSpacing;
+        Vector3 center = new((width - 1) * spacing * .5f,
+            0f, (height - 1) * spacing * .5f);
+
+        if (generationMode == DungeonGenerationMode.DungeonMap)
+        {
+            camera.orthographic = true;
+            camera.transform.position = center +
+                Vector3.up * Mathf.Max(width, height) * spacing * 1.5f;
+            camera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+            float verticalHalf = height * spacing * .5f;
+            float horizontalHalf = width * spacing /
+                (2f * Mathf.Max(.1f, camera.aspect));
+            camera.orthographicSize = Mathf.Max(verticalHalf, horizontalHalf) + spacing;
+        }
+        else
+        {
+            camera.orthographic = false;
+            camera.fieldOfView = 55f;
+            float distance = Mathf.Max(width, height) * spacing * 1.2f;
+            camera.transform.position = center +
+                new Vector3(distance * .65f, distance * .9f, -distance * .7f);
+            camera.transform.LookAt(center);
+            camera.farClipPlane = Mathf.Max(camera.farClipPlane, distance * 4f);
+        }
     }
 
-    private static void SetColor(GameObject obj, Color color)
+    private void SetColor(GameObject obj, Color color)
     {
-        Shader shader = Shader.Find("Universal Render Pipeline/Lit");
-        if (shader == null) shader = Shader.Find("Standard");
-        if (shader == null) return;
-        Material material = new(shader) { color = color };
-        obj.GetComponent<Renderer>().material = material;
+        Color32 value = color;
+        uint key = ((uint)value.r << 24) | ((uint)value.g << 16) |
+            ((uint)value.b << 8) | value.a;
+        if (!generatedMaterials.TryGetValue(key, out Material material))
+        {
+            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
+            if (shader == null) shader = Shader.Find("Standard");
+            if (shader == null) return;
+            material = new Material(shader) { color = color };
+            generatedMaterials.Add(key, material);
+        }
+        obj.GetComponent<Renderer>().sharedMaterial = material;
     }
 }
