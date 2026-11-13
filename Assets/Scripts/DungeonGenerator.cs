@@ -8,6 +8,8 @@ public class DungeonGenerator : MonoBehaviour
     [Range(1, 7)] public int floorLevel = 1;
     public int seed = 12345;
     public float roomSpacing = 5f;
+    [Header("Preview")]
+    public bool frameMainCamera = true;
 
     [Header("Visual Settings")]
     public float roomSize = 4f;
@@ -22,10 +24,10 @@ public class DungeonGenerator : MonoBehaviour
     public Color witherDoorColor = Color.black;
     public Color corridorColor = Color.gray;
 
-    // Floor occupancy is an adjustable visual approximation, not a verified Hypixel rate.
+    // Catacombs minimum map footprints: every cell in the minimum footprint is used.
     private static readonly int[] Widths = { 4, 5, 5, 6, 6, 6, 6 };
     private static readonly int[] Heights = { 5, 5, 5, 5, 5, 6, 6 };
-    private static readonly float[] Densities = { .70f, .74f, .78f, .82f, .86f, .90f, 1.00f };
+    private static readonly int[] PuzzleCounts = { 2, 2, 2, 3, 4, 4, 5 };
 
     private static readonly Vector2Int[] Directions =
     {
@@ -37,11 +39,12 @@ public class DungeonGenerator : MonoBehaviour
         new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.up, Vector2Int.one }, // 2x2
         new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.right * 2, Vector2Int.right * 3 }, // 1x4
         new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.right * 2 }, // 1x3
+        new[] { Vector2Int.zero, Vector2Int.right, Vector2Int.up }, // L (three cells of a 2x2)
         new[] { Vector2Int.zero, Vector2Int.right }, // 1x2
         new[] { Vector2Int.zero } // 1x1
     };
 
-    private static readonly string[] ShapeNames = { "2x2", "1x4", "1x3", "1x2", "1x1" };
+    private static readonly string[] ShapeNames = { "2x2", "1x4", "1x3", "L", "1x2", "1x1" };
 
     private readonly HashSet<Vector2Int> occupied = new();
     private readonly HashSet<(Vector2Int, Vector2Int)> connections = new();
@@ -65,9 +68,9 @@ public class DungeonGenerator : MonoBehaviour
         int index = Mathf.Clamp(floorLevel, 1, 7) - 1;
         int width = Widths[index];
         int height = Heights[index];
-        int target = Mathf.Clamp(Mathf.RoundToInt(width * height * Densities[index]), 2, width * height);
+        int target = width * height;
 
-        // Entrance starts on the outer boundary, never in the center.
+        // Entrance is on the perimeter, facing inward. It has exactly one door.
         int side = random.Next(4);
         entrance = side switch
         {
@@ -76,24 +79,59 @@ public class DungeonGenerator : MonoBehaviour
             2 => new Vector2Int(random.Next(width), 0),
             _ => new Vector2Int(random.Next(width), height - 1)
         };
+        Vector2Int inward = side switch
+        {
+            0 => Vector2Int.right,
+            1 => Vector2Int.left,
+            2 => Vector2Int.up,
+            _ => Vector2Int.down
+        };
+        Vector2Int firstRoomCell = entrance + inward;
         occupied.Add(entrance);
+        occupied.Add(firstRoomCell);
+        AddConnection(entrance, firstRoomCell);
 
-        // Grow a compact, approximately rectangular footprint.
-        // Each new cell must touch an existing cell, preserving connectivity.
-        while (occupied.Count < target)
+        // Reserve a far-away boundary cell for Blood. Add it last as a leaf,
+        // so neither the Start Room nor the Blood Room has a "back door".
+        List<Vector2Int> bloodCandidates = new();
+        int bestBloodDistance = -1;
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                Vector2Int candidate = new(x, y);
+                bool boundary = x == 0 || y == 0 || x == width - 1 || y == height - 1;
+                if (!boundary || candidate == entrance || candidate == firstRoomCell) continue;
+                int distance = Mathf.Abs(x - entrance.x) + Mathf.Abs(y - entrance.y);
+                if (distance > bestBloodDistance)
+                {
+                    bloodCandidates.Clear();
+                    bestBloodDistance = distance;
+                }
+                if (distance == bestBloodDistance) bloodCandidates.Add(candidate);
+            }
+        }
+        boss = bloodCandidates[random.Next(bloodCandidates.Count)];
+
+        // Grow the spanning tree through every cell except the reserved Blood cell.
+        // Never branch from Entrance: its sole connection must point inward.
+        while (occupied.Count < target - 1)
         {
             Vector2Int bestCell = default;
             Vector2Int bestParent = default;
             float bestScore = float.NegativeInfinity;
+            List<Vector2Int> frontier = new(occupied);
+            frontier.Sort((a, b) => a.x != b.x ? a.x.CompareTo(b.x) : a.y.CompareTo(b.y));
 
-            foreach (Vector2Int from in occupied)
+            foreach (Vector2Int from in frontier)
             {
+                if (from == entrance) continue;
                 foreach (Vector2Int direction in Directions)
                 {
                     Vector2Int candidate = from + direction;
                     if (candidate.x < 0 || candidate.y < 0 ||
                         candidate.x >= width || candidate.y >= height ||
-                        occupied.Contains(candidate))
+                        candidate == boss || occupied.Contains(candidate))
                         continue;
 
                     int neighbors = 0;
@@ -124,13 +162,51 @@ public class DungeonGenerator : MonoBehaviour
                     bestParent = from;
                 }
             }
+            if (bestScore == float.NegativeInfinity)
+            {
+                Debug.LogError("Unable to grow dungeon layout.");
+                return;
+            }
 
             occupied.Add(bestCell);
             AddConnection(bestParent, bestCell);
         }
 
-        // Blood must also be on the outer boundary.
-        boss = FindFarthestBoundaryCell(width, height);
+        // Attach Blood through one connection. Prefer the deepest available
+        // neighbor to make the critical path more interesting.
+        Dictionary<Vector2Int, int> depths = new() { [entrance] = 0 };
+        Queue<Vector2Int> depthQueue = new();
+        depthQueue.Enqueue(entrance);
+        while (depthQueue.Count > 0)
+        {
+            Vector2Int cell = depthQueue.Dequeue();
+            foreach (Vector2Int dir in Directions)
+            {
+                Vector2Int next = cell + dir;
+                if (!occupied.Contains(next) || depths.ContainsKey(next) ||
+                    !HasConnection(cell, next)) continue;
+                depths[next] = depths[cell] + 1;
+                depthQueue.Enqueue(next);
+            }
+        }
+        Vector2Int bloodParent = default;
+        int bestDepth = -1;
+        foreach (Vector2Int dir in Directions)
+        {
+            Vector2Int neighbor = boss + dir;
+            if (neighbor == entrance || !depths.TryGetValue(neighbor, out int depth)) continue;
+            if (depth <= bestDepth) continue;
+            bestDepth = depth;
+            bloodParent = neighbor;
+        }
+        if (bestDepth < 0)
+        {
+            Debug.LogError("Blood Room could not be attached.");
+            return;
+        }
+        occupied.Add(boss);
+        AddConnection(bloodParent, boss);
+
         // Recover the critical path from Entrance to Blood using the spanning tree.
         Dictionary<Vector2Int, Vector2Int> parents = new() { [entrance] = entrance };
         Queue<Vector2Int> queue = new();
@@ -173,7 +249,7 @@ public class DungeonGenerator : MonoBehaviour
         Dictionary<Vector2Int, (string label, Color color)> special = new();
         if (fairy != entrance) special[fairy] = ("Fairy", fairyColor);
         int leafIndex = 0;
-        int puzzleTarget = Mathf.Clamp(1 + Mathf.RoundToInt((floorLevel - 1) * 4f / 6f), 1, 5); // F1-F7: 1, 2, 2, 3, 4, 4, 5
+        int puzzleTarget = PuzzleCounts[index]; // F1-F7: 2, 2, 2, 3, 4, 4, 5
         List<Vector2Int> puzzleCells = new(leaves);
         if (puzzleCells.Count < puzzleTarget)
         {
@@ -206,19 +282,22 @@ public class DungeonGenerator : MonoBehaviour
             cellRoomIds[entry.Key] = roomId++;
         }
 
+        // Tile connected multi-cell Normal Rooms globally before any 1x1 fallback.
+        // A random single-cell anchor would fragment the map and almost always
+        // leave the larger real room shapes unused.
+        HashSet<int> usedNormalShapes = new();
         while (remaining.Count > 0)
         {
-            List<Vector2Int> candidates = new(remaining);
-            Vector2Int anchor = candidates[random.Next(candidates.Count)];
-            List<(int shape, List<Vector2Int> cells)> fits = new();
+            List<(int shape, int rotation, List<Vector2Int> cells)> fits = new();
+            List<Vector2Int> pivots = new(remaining);
+            pivots.Sort((a, b) => a.x != b.x ? a.x.CompareTo(b.x) : a.y.CompareTo(b.y));
 
-            for (int shape = 0; shape < Shapes.Length; shape++)
+            for (int shape = 0; shape < Shapes.Length - 1; shape++) // multi-cell only
             {
                 for (int rotation = 0; rotation < 4; rotation++)
                 {
-                    foreach (Vector2Int offset in Shapes[shape])
+                    foreach (Vector2Int pivot in pivots)
                     {
-                        Vector2Int pivot = anchor - Rotate(offset, rotation);
                         List<Vector2Int> cells = new();
                         bool valid = true;
                         foreach (Vector2Int point in Shapes[shape])
@@ -227,16 +306,36 @@ public class DungeonGenerator : MonoBehaviour
                             if (!remaining.Contains(cell)) { valid = false; break; }
                             cells.Add(cell);
                         }
-                        if (valid) fits.Add((shape, cells));
+                        if (valid) fits.Add((shape, rotation, cells));
                     }
                 }
             }
 
-            // Prefer larger shapes while retaining variation.
-            fits.Sort((a, b) => b.cells.Count.CompareTo(a.cells.Count));
-            int pool = Mathf.Min(fits.Count, 8);
-            var chosen = fits[random.Next(pool)];
-            CreateRoom(roomId, ShapeNames[chosen.shape], chosen.cells, normalColor);
+            if (fits.Count == 0)
+            {
+                Vector2Int single = pivots[random.Next(pivots.Count)];
+                CreateRoom(roomId, "1x1", new List<Vector2Int> { single }, normalColor);
+                cellRoomIds[single] = roomId++;
+                remaining.Remove(single);
+                continue;
+            }
+
+            // Favor large shapes, but also reward different shape types.
+            // Rotations are enumerated explicitly (0/90/180/270 degrees).
+            int bestScore = int.MinValue;
+            (int shape, int rotation, List<Vector2Int> cells) chosen = default;
+            foreach (var fit in fits)
+            {
+                int score = fit.cells.Count * 8
+                    + (usedNormalShapes.Contains(fit.shape) ? 0 : 12)
+                    + random.Next(16);
+                if (score <= bestScore) continue;
+                bestScore = score;
+                chosen = fit;
+            }
+
+            CreateRoom(roomId, ShapeNames[chosen.shape], chosen.cells, normalColor, chosen.rotation);
+            usedNormalShapes.Add(chosen.shape);
             foreach (Vector2Int cell in chosen.cells)
             {
                 cellRoomIds[cell] = roomId;
@@ -264,7 +363,9 @@ public class DungeonGenerator : MonoBehaviour
             }
         }
 
-        Debug.Log($"F{floorLevel}: {roomId} rooms, {occupied.Count}/{width * height} cells, seed {seed}");
+        FrameMainCamera(width, height);
+        Debug.Log($"F{floorLevel}: {roomId} rooms, {occupied.Count}/{width * height} cells, " +
+            $"normal shapes: {string.Join(", ", usedNormalShapes)}, seed {seed}");
     }
 
     private bool HasConnection(Vector2Int a, Vector2Int b)
@@ -313,67 +414,32 @@ public class DungeonGenerator : MonoBehaviour
         connections.Add((a, b));
     }
 
-    private Vector2Int FindFarthestBoundaryCell(int width, int height)
+    private void CreateRoom(int id, string shape, List<Vector2Int> cells, Color color, int rotation = 0)
     {
-        Queue<Vector2Int> queue = new();
-        Dictionary<Vector2Int, int> distances = new() { [entrance] = 0 };
-        queue.Enqueue(entrance);
-        Vector2Int farthest = entrance;
-        while (queue.Count > 0)
-        {
-            Vector2Int current = queue.Dequeue();
-            bool boundary = current.x == 0 || current.y == 0 ||
-                current.x == width - 1 || current.y == height - 1;
-            if (boundary && distances[current] > distances[farthest])
-                farthest = current;
-            foreach (Vector2Int direction in Directions)
-            {
-                Vector2Int next = current + direction;
-                if (!occupied.Contains(next) || distances.ContainsKey(next) ||
-                    !HasConnection(current, next)) continue;
-                distances[next] = distances[current] + 1;
-                queue.Enqueue(next);
-            }
-        }
-        return farthest;
-    }
-
-    private Vector2Int FindFarthestCell()
-    {
-        Queue<Vector2Int> queue = new();
-        Dictionary<Vector2Int, int> distance = new() { [entrance] = 0 };
-        queue.Enqueue(entrance);
-        Vector2Int farthest = entrance;
-        while (queue.Count > 0)
-        {
-            Vector2Int current = queue.Dequeue();
-            foreach (Vector2Int direction in Directions)
-            {
-                Vector2Int next = current + direction;
-                if (!occupied.Contains(next) || distance.ContainsKey(next)) continue;
-                Vector2Int a = current, b = next;
-                if (a.x > b.x || (a.x == b.x && a.y > b.y)) (a, b) = (b, a);
-                if (!connections.Contains((a, b))) continue;
-                distance[next] = distance[current] + 1;
-                queue.Enqueue(next);
-                if (distance[next] > distance[farthest]) farthest = next;
-            }
-        }
-        return farthest;
-    }
-
-    private void CreateRoom(int id, string shape, List<Vector2Int> cells, Color color)
-    {
-        GameObject parent = new($"Room_{id}_{shape}");
+        GameObject parent = new($"Room_{id}_{shape}_R{rotation * 90}");
         parent.transform.SetParent(transform, false);
         generated.Add(parent);
+
+        // Expand each tile to its neighbor inside the same room, leaving a
+        // gap only around the room perimeter. Multi-cell rooms therefore
+        // render as a single connected footprint rather than separate squares.
+        HashSet<Vector2Int> members = new(cells);
+        float spacing = Mathf.Max(roomSpacing, .1f);
+        float border = Mathf.Clamp((spacing - roomSize) * .5f, .025f, spacing * .45f);
         foreach (Vector2Int cell in cells)
         {
+            float cx = cell.x * spacing;
+            float cz = cell.y * spacing;
+            float xMin = cx - spacing * .5f + (members.Contains(cell + Vector2Int.left) ? 0f : border);
+            float xMax = cx + spacing * .5f - (members.Contains(cell + Vector2Int.right) ? 0f : border);
+            float zMin = cz - spacing * .5f + (members.Contains(cell + Vector2Int.down) ? 0f : border);
+            float zMax = cz + spacing * .5f - (members.Contains(cell + Vector2Int.up) ? 0f : border);
+
             GameObject tile = GameObject.CreatePrimitive(PrimitiveType.Cube);
             tile.name = $"Tile_{cell.x}_{cell.y}";
             tile.transform.SetParent(parent.transform, false);
-            tile.transform.localPosition = new Vector3(cell.x * roomSpacing, 0, cell.y * roomSpacing);
-            tile.transform.localScale = new Vector3(roomSize, .5f, roomSize);
+            tile.transform.localPosition = new Vector3((xMin + xMax) * .5f, 0, (zMin + zMax) * .5f);
+            tile.transform.localScale = new Vector3(xMax - xMin, .5f, zMax - zMin);
             SetColor(tile, color);
         }
     }
@@ -391,6 +457,20 @@ public class DungeonGenerator : MonoBehaviour
             ? new Vector3(roomSpacing, .3f, corridorWidth)
             : new Vector3(corridorWidth, .3f, roomSpacing);
         SetColor(corridor, corridorColor);
+    }
+
+    private void FrameMainCamera(int width, int height)
+    {
+        if (!frameMainCamera || Camera.main == null) return;
+        Camera camera = Camera.main;
+        camera.orthographic = true;
+        camera.transform.position = new Vector3((width - 1) * roomSpacing * .5f,
+            Mathf.Max(width, height) * roomSpacing * 1.5f,
+            (height - 1) * roomSpacing * .5f);
+        camera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+        float verticalHalf = height * roomSpacing * .5f;
+        float horizontalHalf = width * roomSpacing / (2f * Mathf.Max(.1f, camera.aspect));
+        camera.orthographicSize = Mathf.Max(verticalHalf, horizontalHalf) + roomSpacing;
     }
 
     private static void SetColor(GameObject obj, Color color)
