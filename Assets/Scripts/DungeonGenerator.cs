@@ -12,7 +12,9 @@ public class DungeonGenerator : MonoBehaviour
 {
     [Header("Dungeon Settings")]
     [Range(1, 7)] public int floorLevel = 1;
-    public int seed = 12345;
+    // Enter a number, a text seed, or "random" for a new layout each run.
+    public string seed = "12345";
+    public int ActiveSeed { get; private set; }
     public float roomSpacing = 5f;
 
     [Header("Generation Mode")]
@@ -70,7 +72,11 @@ public class DungeonGenerator : MonoBehaviour
     private readonly HashSet<Vector2Int> occupied = new();
     private readonly HashSet<(Vector2Int, Vector2Int)> connections = new();
     private readonly Dictionary<Vector2Int, int> cellRoomIds = new();
+    private readonly Dictionary<int, Color> roomColors = new();
+    private readonly List<DungeonCorridorInfo> minimapPassages = new();
     private readonly List<GameObject> generated = new();
+    private Camera disabledSceneCamera;
+    private AudioListener disabledSceneListener;
     private readonly Dictionary<uint, Material> generatedMaterials = new();
     private System.Random random;
     private Vector2Int entrance;
@@ -85,7 +91,10 @@ public class DungeonGenerator : MonoBehaviour
         occupied.Clear();
         connections.Clear();
         cellRoomIds.Clear();
-        random = new System.Random(seed);
+        roomColors.Clear();
+        minimapPassages.Clear();
+        ActiveSeed = ResolveSeed(seed);
+        random = new System.Random(ActiveSeed);
 
         int index = Mathf.Clamp(floorLevel, 1, 7) - 1;
         int width = Widths[index];
@@ -408,11 +417,14 @@ public class DungeonGenerator : MonoBehaviour
                 $"connections, Start={startConnections}, Blood={bloodConnections}.");
 
         FrameMainCamera(width, height);
+        if (generationMode == DungeonGenerationMode.Dungeon && Application.isPlaying)
+            SpawnDungeonPlayer(width, height);
+
         List<string> shapeSummary = new();
         foreach (int shape in usedNormalShapes) shapeSummary.Add(ShapeNames[shape]);
         shapeSummary.Sort();
         Debug.Log($"F{floorLevel}: {roomId} rooms, {occupied.Count}/{width * height} cells, " +
-            $"normal shapes: {string.Join(", ", shapeSummary)}, seed {seed}");
+            $"normal shapes: {string.Join(", ", shapeSummary)}, seed {ActiveSeed}");
     }
 
     private bool HasConnection(Vector2Int a, Vector2Int b)
@@ -449,6 +461,7 @@ public class DungeonGenerator : MonoBehaviour
 
     private void ClearGenerated()
     {
+        RestoreSceneCamera();
         // After a Unity domain reload, the non-serialized generated list resets
         // even when old room/corridor roots remain in the Scene.
         HashSet<GameObject> stale = new(generated);
@@ -499,6 +512,7 @@ public class DungeonGenerator : MonoBehaviour
 
     private void CreateRoom(int id, string shape, List<Vector2Int> cells, Color color, int rotation = 0)
     {
+        roomColors[id] = color;
         GameObject parent = new($"Room_{id}_{shape}_R{rotation * 90}");
         parent.transform.SetParent(transform, false);
         generated.Add(parent);
@@ -575,7 +589,7 @@ public class DungeonGenerator : MonoBehaviour
 
         // Repeatable low obstacles placed near corners, away from door axes.
         // This gives rooms geometry beyond a flat map without blocking routes.
-        System.Random terrainRandom = new(unchecked(seed * 397 ^ id * 7919));
+        System.Random terrainRandom = new(unchecked(ActiveSeed * 397 ^ id * 7919));
         foreach (Vector2Int cell in cells)
         {
             if (shape == "Entrance" || shape == "Blood" || shape == "Fairy")
@@ -726,6 +740,7 @@ public class DungeonGenerator : MonoBehaviour
 
     private void CreateCorridor(Vector2Int a, Vector2Int b, Color color)
     {
+        minimapPassages.Add(new DungeonCorridorInfo(a, b, color));
         GameObject parent = new($"Corridor_{a.x}_{a.y}_to_{b.x}_{b.y}");
         parent.transform.SetParent(transform, false);
         generated.Add(parent);
@@ -790,8 +805,101 @@ public class DungeonGenerator : MonoBehaviour
         return block;
     }
 
+    private static int ResolveSeed(string value)
+    {
+        string text = value?.Trim() ?? "";
+        if (string.Equals(text, "random", StringComparison.OrdinalIgnoreCase))
+            return Guid.NewGuid().GetHashCode();
+        if (int.TryParse(text, out int number))
+            return number;
+        if (text.Length == 0)
+        {
+            Debug.LogWarning("Seed is empty; using default seed 12345. Enter 'random' to randomize.");
+            return 12345;
+        }
+
+        // Stable FNV-1a hash: arbitrary text yields the same dungeon each run.
+        unchecked
+        {
+            uint hash = 2166136261;
+            foreach (char letter in text)
+            {
+                hash ^= letter;
+                hash *= 16777619;
+            }
+            return (int)hash;
+        }
+    }
+
+    private void SpawnDungeonPlayer(int width, int height)
+    {
+        GameObject player = new("DungeonPlayer");
+        player.transform.SetParent(transform, false);
+        player.transform.localPosition = new Vector3(
+            entrance.x * WorldSpacing, .12f, entrance.y * WorldSpacing);
+        generated.Add(player);
+
+        CharacterController character = player.AddComponent<CharacterController>();
+        character.height = 2f;
+        character.radius = .38f;
+        character.center = new Vector3(0f, 1f, 0f);
+        character.stepOffset = .35f;
+        character.slopeLimit = 50f;
+
+        // Use a dedicated first-person camera; never destroy the scene camera.
+        // Restore the scene camera on regeneration / mode switch.
+        disabledSceneCamera = Camera.main;
+        if (disabledSceneCamera != null)
+        {
+            disabledSceneCamera.enabled = false;
+            disabledSceneListener = disabledSceneCamera.GetComponent<AudioListener>();
+            if (disabledSceneListener != null)
+                disabledSceneListener.enabled = false;
+        }
+
+        GameObject view = new("DungeonPlayerCamera");
+        view.tag = "MainCamera";
+        view.transform.SetParent(player.transform, false);
+        view.transform.localPosition = new Vector3(0f, 1.65f, 0f);
+        Camera playerCamera = view.AddComponent<Camera>();
+        playerCamera.nearClipPlane = .05f;
+        playerCamera.farClipPlane = Mathf.Max(500f,
+            Mathf.Max(width, height) * WorldSpacing * 3f);
+        playerCamera.fieldOfView = 75f;
+        view.AddComponent<AudioListener>();
+
+        DungeonPlayerController movement = player.AddComponent<DungeonPlayerController>();
+        movement.Initialize(view.transform);
+
+        DungeonMinimap minimap = player.AddComponent<DungeonMinimap>();
+        minimap.Initialize(width, height, floorLevel, ActiveSeed, WorldSpacing,
+            player.transform, cellRoomIds, roomColors, minimapPassages);
+    }
+
+    private void RestoreSceneCamera()
+    {
+        if (disabledSceneCamera != null)
+        {
+            disabledSceneCamera.enabled = true;
+            disabledSceneCamera = null;
+        }
+        if (disabledSceneListener != null)
+        {
+            disabledSceneListener.enabled = true;
+            disabledSceneListener = null;
+        }
+    }
+
+    private void OnDisable()
+    {
+        RestoreSceneCamera();
+    }
+
     private void FrameMainCamera(int width, int height)
     {
+        // In Play Mode the first-person camera owns the Game view.
+        if (generationMode == DungeonGenerationMode.Dungeon && Application.isPlaying)
+            return;
         if (!frameMainCamera || Camera.main == null) return;
         Camera camera = Camera.main;
         float spacing = WorldSpacing;
