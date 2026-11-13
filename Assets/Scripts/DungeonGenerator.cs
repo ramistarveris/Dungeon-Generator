@@ -449,7 +449,17 @@ public class DungeonGenerator : MonoBehaviour
 
     private void ClearGenerated()
     {
-        foreach (GameObject obj in generated)
+        // After a Unity domain reload, the non-serialized generated list resets
+        // even when old room/corridor roots remain in the Scene.
+        HashSet<GameObject> stale = new(generated);
+        for (int i = 0; i < transform.childCount; i++)
+        {
+            GameObject child = transform.GetChild(i).gameObject;
+            if (child.name.StartsWith("Room_", StringComparison.Ordinal) ||
+                child.name.StartsWith("Corridor_", StringComparison.Ordinal))
+                stale.Add(child);
+        }
+        foreach (GameObject obj in stale)
         {
             if (obj == null) continue;
             obj.SetActive(false);
