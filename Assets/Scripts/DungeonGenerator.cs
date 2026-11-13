@@ -562,6 +562,13 @@ public class DungeonGenerator : MonoBehaviour
 
         JoinRoomCells(parent, cells, spacing, size, floorThickness,
             -floorThickness * .5f, floorColor);
+
+        // Joining cell floors also creates new perimeter edges in the gap.
+        // Close those edges with walls; otherwise long and L-shaped rooms
+        // have conspicuous missing wall sections between the tile walls.
+        CreateInternalWallConnectors(parent, cells, spacing, size,
+            thickness, wallHeight);
+
         if (generateCeilings)
             JoinRoomCells(parent, cells, spacing, size, thickness,
                 wallHeight + thickness * .5f, dungeonWallColor);
@@ -624,6 +631,63 @@ public class DungeonGenerator : MonoBehaviour
                 : new Vector3(segmentLength, height, thickness);
             CreateBlock(parent, $"Wall_{cell.x}_{cell.y}_{direction.x}_{direction.y}_{i}",
                 position, scale, dungeonWallColor);
+        }
+    }
+
+    // Complete the outer perimeter of merged multi-cell rooms.
+    // The wall on each individual tile ends where its floor ends, while
+    // JoinRoomCells adds floor across the spacing gap. Cap both exposed
+    // edges of each bridge so the combined room has no holes at seams.
+    // When a neighboring cell exists on both sides, the seam is interior
+    // (for example, the middle of a 2x2 room), so no wall is needed.
+    private void CreateInternalWallConnectors(Transform parent,
+        List<Vector2Int> cells, float spacing, float size,
+        float thickness, float height)
+    {
+        HashSet<Vector2Int> members = new(cells);
+        float gap = spacing - size;
+        if (gap <= .001f) return;
+
+        float bridgeLength = gap + thickness; // slight overlap at joins
+        foreach (Vector2Int cell in cells)
+        {
+            // A horizontal floor bridge connects this cell to its right.
+            if (members.Contains(cell + Vector2Int.right))
+            {
+                Vector2Int right = cell + Vector2Int.right;
+                foreach (int side in new[] { -1, 1 })
+                {
+                    Vector2Int outward = side == 1 ? Vector2Int.up : Vector2Int.down;
+                    if (members.Contains(cell + outward) &&
+                        members.Contains(right + outward)) continue;
+
+                    CreateBlock(parent,
+                        $"BridgeWall_X_{cell.x}_{cell.y}_{side}",
+                        new Vector3((cell.x + .5f) * spacing, height * .5f,
+                            cell.y * spacing + side * size * .5f),
+                        new Vector3(bridgeLength, height, thickness),
+                        dungeonWallColor);
+                }
+            }
+
+            // A vertical floor bridge connects this cell to the cell above.
+            if (members.Contains(cell + Vector2Int.up))
+            {
+                Vector2Int up = cell + Vector2Int.up;
+                foreach (int side in new[] { -1, 1 })
+                {
+                    Vector2Int outward = side == 1 ? Vector2Int.right : Vector2Int.left;
+                    if (members.Contains(cell + outward) &&
+                        members.Contains(up + outward)) continue;
+
+                    CreateBlock(parent,
+                        $"BridgeWall_Z_{cell.x}_{cell.y}_{side}",
+                        new Vector3(cell.x * spacing + side * size * .5f,
+                            height * .5f, (cell.y + .5f) * spacing),
+                        new Vector3(thickness, height, bridgeLength),
+                        dungeonWallColor);
+                }
+            }
         }
     }
 
