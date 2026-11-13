@@ -479,7 +479,7 @@ MonoBehaviour:
   gridSize: 6
   roomCount: 20
   roomSpacing: 5
-  seed: 44
+  seed: '44'
   roomSize: 4
   corridorWidth: 1.5
 --- !u!1660057539 &9223372036854775807
