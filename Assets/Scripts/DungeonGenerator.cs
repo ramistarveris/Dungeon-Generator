@@ -306,7 +306,11 @@ public class DungeonGenerator : MonoBehaviour
                             if (!remaining.Contains(cell)) { valid = false; break; }
                             cells.Add(cell);
                         }
-                        if (valid) fits.Add((shape, rotation, cells));
+                        // A room may only absorb cells connected by tree edges.
+                        // Geometrical adjacency alone can merge unrelated branches,
+                        // creating two doors between the same room pair (a cycle).
+                        if (valid && IsTreeConnected(cells))
+                            fits.Add((shape, rotation, cells));
                     }
                 }
             }
@@ -344,24 +348,42 @@ public class DungeonGenerator : MonoBehaviour
             roomId++;
         }
 
-        // Add corridors only across room boundaries. The spanning-tree edges
-        // guarantee a path from Entrance to Boss even with multi-cell rooms.
+        // Contract each tree-connected room into one node. The room graph
+        // remains a tree: one unique Start-to-Blood route with bonus branches.
+        // Door types are corridor colors; no separate door GameObjects.
+        HashSet<(int, int)> roomEdges = new();
+        int startConnections = 0;
+        int bloodConnections = 0;
         foreach (var edge in connections)
         {
-            if (cellRoomIds[edge.Item1] != cellRoomIds[edge.Item2])
+            int a = cellRoomIds[edge.Item1];
+            int b = cellRoomIds[edge.Item2];
+            if (a == b) continue; // Seam inside a multi-cell Normal Room.
+
+            (int, int) roomEdge = a < b ? (a, b) : (b, a);
+            if (!roomEdges.Add(roomEdge))
             {
-                CreateCorridor(edge.Item1, edge.Item2);
-                if (critical.Contains(edge.Item1) && critical.Contains(edge.Item2))
-                {
-                    if (edge.Item1 == boss || edge.Item2 == boss)
-                        CreateDoor(edge.Item1, edge.Item2, "BloodDoor", bossColor);
-                    else if (edge.Item1 == entrance || edge.Item2 == entrance)
-                        CreateDoor(edge.Item1, edge.Item2, "StartDoor", corridorColor);
-                    else
-                        CreateDoor(edge.Item1, edge.Item2, "WitherDoor", witherDoorColor);
-                }
+                Debug.LogError($"Duplicate room connection {a}-{b}; layout is not a tree.");
+                continue;
             }
+            if (edge.Item1 == entrance || edge.Item2 == entrance) startConnections++;
+            if (edge.Item1 == boss || edge.Item2 == boss) bloodConnections++;
+
+            Color corridor = corridorColor; // Normal or Bonus Path
+            if (critical.Contains(edge.Item1) && critical.Contains(edge.Item2))
+            {
+                if (edge.Item1 == boss || edge.Item2 == boss)
+                    corridor = bossColor; // Blood Door: red corridor
+                else if (edge.Item1 == entrance || edge.Item2 == entrance)
+                    corridor = corridorColor; // Start Door: normal corridor
+                else
+                    corridor = witherDoorColor; // Wither Door: black corridor
+            }
+            CreateCorridor(edge.Item1, edge.Item2, corridor);
         }
+        if (roomEdges.Count != roomId - 1 || startConnections != 1 || bloodConnections != 1)
+            Debug.LogError($"Invalid dungeon tree: {roomEdges.Count}/{roomId - 1} " +
+                $"connections, Start={startConnections}, Blood={bloodConnections}.");
 
         FrameMainCamera(width, height);
         List<string> shapeSummary = new();
@@ -377,18 +399,30 @@ public class DungeonGenerator : MonoBehaviour
         return connections.Contains((a, b));
     }
 
-    private void CreateDoor(Vector2Int a, Vector2Int b, string label, Color color)
+    // Every cell of a multi-cell room must be connected using the
+    // original spanning-tree edges, not merely touching geometrically.
+    private bool IsTreeConnected(List<Vector2Int> cells)
     {
-        GameObject door = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        door.name = label;
-        door.transform.SetParent(transform, false);
-        generated.Add(door);
-        door.transform.localPosition = new Vector3((a.x + b.x) * roomSpacing / 2f, .35f,
-            (a.y + b.y) * roomSpacing / 2f);
-        door.transform.localScale = a.x != b.x
-            ? new Vector3(.2f, 1f, corridorWidth)
-            : new Vector3(corridorWidth, 1f, .2f);
-        SetColor(door, color);
+        if (cells.Count <= 1) return true;
+        HashSet<Vector2Int> group = new(cells);
+        HashSet<Vector2Int> visited = new() { cells[0] };
+        Queue<Vector2Int> queue = new();
+        queue.Enqueue(cells[0]);
+        while (queue.Count > 0)
+        {
+            Vector2Int cell = queue.Dequeue();
+            foreach (Vector2Int direction in Directions)
+            {
+                Vector2Int next = cell + direction;
+                if (group.Contains(next) && !visited.Contains(next) &&
+                    HasConnection(cell, next))
+                {
+                    visited.Add(next);
+                    queue.Enqueue(next);
+                }
+            }
+        }
+        return visited.Count == cells.Count;
     }
 
     private void ClearGenerated()
@@ -447,7 +481,7 @@ public class DungeonGenerator : MonoBehaviour
         }
     }
 
-    private void CreateCorridor(Vector2Int a, Vector2Int b)
+    private void CreateCorridor(Vector2Int a, Vector2Int b, Color color)
     {
         GameObject corridor = GameObject.CreatePrimitive(PrimitiveType.Cube);
         corridor.name = $"Corridor_{a.x}_{a.y}_to_{b.x}_{b.y}";
@@ -459,7 +493,7 @@ public class DungeonGenerator : MonoBehaviour
         corridor.transform.localScale = a.x != b.x
             ? new Vector3(roomSpacing, .3f, corridorWidth)
             : new Vector3(corridorWidth, .3f, roomSpacing);
-        SetColor(corridor, corridorColor);
+        SetColor(corridor, color);
     }
 
     private void FrameMainCamera(int width, int height)
