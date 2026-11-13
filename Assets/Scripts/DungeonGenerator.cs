@@ -364,8 +364,11 @@ public class DungeonGenerator : MonoBehaviour
         }
 
         FrameMainCamera(width, height);
+        List<string> shapeSummary = new();
+        foreach (int shape in usedNormalShapes) shapeSummary.Add(ShapeNames[shape]);
+        shapeSummary.Sort();
         Debug.Log($"F{floorLevel}: {roomId} rooms, {occupied.Count}/{width * height} cells, " +
-            $"normal shapes: {string.Join(", ", usedNormalShapes)}, seed {seed}");
+            $"normal shapes: {string.Join(", ", shapeSummary)}, seed {seed}");
     }
 
     private bool HasConnection(Vector2Int a, Vector2Int b)
