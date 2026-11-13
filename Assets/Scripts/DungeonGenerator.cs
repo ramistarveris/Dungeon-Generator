@@ -511,7 +511,7 @@ public class DungeonGenerator : MonoBehaviour
                 new Vector3(cell.x * spacing, 0f, cell.y * spacing),
                 new Vector3(size, .5f, size), color);
         }
-        JoinRoomCells(parent, cells, spacing, size, .5f, color);
+        JoinRoomCells(parent, cells, spacing, size, .5f, 0f, color);
     }
 
     // Primitive-based 3D prototype: traversable floors, walls with proper
@@ -550,7 +550,11 @@ public class DungeonGenerator : MonoBehaviour
             }
         }
 
-        JoinRoomCells(parent, cells, spacing, size, floorThickness, floorColor);
+        JoinRoomCells(parent, cells, spacing, size, floorThickness,
+            -floorThickness * .5f, floorColor);
+        if (generateCeilings)
+            JoinRoomCells(parent, cells, spacing, size, thickness,
+                wallHeight + thickness * .5f, dungeonWallColor);
 
         // Repeatable low obstacles placed near corners, away from door axes.
         // This gives rooms geometry beyond a flat map without blocking routes.
@@ -617,7 +621,7 @@ public class DungeonGenerator : MonoBehaviour
     // rooms. All bridges stay within their own grid footprint, unlike the
     // old neighbor-dependent tile scaling.
     private void JoinRoomCells(Transform parent, List<Vector2Int> cells,
-        float spacing, float size, float height, Color color)
+        float spacing, float size, float height, float yCenter, Color color)
     {
         HashSet<Vector2Int> members = new(cells);
         float gap = spacing - size;
@@ -626,13 +630,13 @@ public class DungeonGenerator : MonoBehaviour
         {
             if (members.Contains(cell + Vector2Int.right))
                 CreateBlock(parent, $"InternalBridge_X_{cell.x}_{cell.y}",
-                    new Vector3((cell.x + .5f) * spacing, -height * .5f,
+                    new Vector3((cell.x + .5f) * spacing, yCenter,
                         cell.y * spacing),
                     new Vector3(gap + .02f, height, size), color);
 
             if (members.Contains(cell + Vector2Int.up))
                 CreateBlock(parent, $"InternalBridge_Z_{cell.x}_{cell.y}",
-                    new Vector3(cell.x * spacing, -height * .5f,
+                    new Vector3(cell.x * spacing, yCenter,
                         (cell.y + .5f) * spacing),
                     new Vector3(size, height, gap + .02f), color);
 
@@ -640,7 +644,7 @@ public class DungeonGenerator : MonoBehaviour
                 members.Contains(cell + Vector2Int.up) &&
                 members.Contains(cell + Vector2Int.one))
                 CreateBlock(parent, $"InternalCorner_{cell.x}_{cell.y}",
-                    new Vector3((cell.x + .5f) * spacing, -height * .5f,
+                    new Vector3((cell.x + .5f) * spacing, yCenter,
                         (cell.y + .5f) * spacing),
                     new Vector3(gap + .02f, height, gap + .02f), color);
         }
